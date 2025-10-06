@@ -5,6 +5,10 @@ class RandomChatApp {
         this.isConnected = false;
         this.typingTimer = null;
         this.messageSound = document.getElementById('message-sound');
+        this.heartbeatInterval = null;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 10;
+        this.isSearching = false;
         
         this.init();
     }
@@ -13,33 +17,95 @@ class RandomChatApp {
         this.connectSocket();
         this.bindEvents();
         this.showScreen('welcome-screen');
+        this.startConnectionMonitor();
     }
 
     connectSocket() {
-        this.socket = io();
+        this.socket = io({
+            // إعدادات تحسين الاتصال
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            maxReconnectionAttempts: 10,
+            timeout: 20000,
+            forceNew: false,
+            transports: ['polling', 'websocket']
+        });
         
         // حالة الاتصال
         this.socket.on('connect', () => {
             console.log('متصل بالخادم');
             this.isConnected = true;
+            this.reconnectAttempts = 0;
             this.updateConnectionStatus(true);
+            this.startHeartbeat();
         });
 
-        this.socket.on('disconnect', () => {
-            console.log('انقطع الاتصال مع الخادم');
+        this.socket.on('disconnect', (reason) => {
+            console.log('انقطع الاتصال مع الخادم - السبب:', reason);
             this.isConnected = false;
             this.updateConnectionStatus(false);
+            this.stopHeartbeat();
             this.showSystemMessage('انقطع الاتصال مع الخادم. جار إعادة المحاولة...');
+            
+            // إذا كان الانقطاع بسبب خطأ في النقل، جرب إعادة الاتصال فوراً
+            if (reason === 'transport error' || reason === 'transport close') {
+                setTimeout(() => {
+                    if (!this.socket.connected) {
+                        this.socket.connect();
+                    }
+                }, 1000);
+            }
+        });
+
+        // معالجة محاولة إعادة الاتصال
+        this.socket.on('reconnect_attempt', (attemptNumber) => {
+            console.log(`محاولة إعادة الاتصال #${attemptNumber}`);
+            this.showSystemMessage(`محاولة إعادة الاتصال (${attemptNumber})...`);
+        });
+
+        this.socket.on('reconnect', (attemptNumber) => {
+            console.log(`تم إعادة الاتصال بعد ${attemptNumber} محاولات`);
+            this.isConnected = true;
+            this.reconnectAttempts = 0;
+            this.updateConnectionStatus(true);
+            this.startHeartbeat();
+            this.showSystemMessage('تم إعادة الاتصال بنجاح!');
+            
+            // إذا كان هناك شريك سابق، حاول العثور على شريك جديد
+            if (this.currentPartner && document.getElementById('chat-screen').classList.contains('active')) {
+                this.showSystemMessage('جار البحث عن شريك جديد بعد إعادة الاتصال...');
+                setTimeout(() => {
+                    this.findPartner();
+                }, 2000);
+            }
+        });
+
+        this.socket.on('reconnect_error', (error) => {
+            console.log('خطأ في إعادة الاتصال:', error);
+        });
+
+        this.socket.on('reconnect_failed', () => {
+            console.log('فشل في إعادة الاتصال');
+            this.showSystemMessage('فشل في إعادة الاتصال. يرجى تحديث الصفحة.');
+            this.stopHeartbeat();
+        });
+
+        // معالجة heartbeat
+        this.socket.on('pong', () => {
+            console.log('Heartbeat موجود');
         });
 
         // أحداث البحث عن شريك
         this.socket.on('waiting-for-partner', () => {
             console.log('في قائمة الانتظار');
+            this.isSearching = false;
             this.showScreen('waiting-screen');
         });
 
         this.socket.on('partner-found', (data) => {
             console.log('تم العثور على شريك:', data.partnerId);
+            this.isSearching = false;
             this.currentPartner = data.partnerId;
             this.showScreen('chat-screen');
             this.clearMessages();
@@ -184,11 +250,24 @@ class RandomChatApp {
             return;
         }
         
+        // منع البحث المتكرر
+        if (this.isSearching) {
+            console.log('البحث جار بالفعل...');
+            return;
+        }
+        
         console.log('البحث عن شريك...');
+        this.isSearching = true;
         this.socket.emit('find-partner');
+        
+        // إيقاف البحث تلقائياً بعد 30 ثانية
+        setTimeout(() => {
+            this.isSearching = false;
+        }, 30000);
     }
 
     cancelSearch() {
+        this.isSearching = false;
         this.showScreen('welcome-screen');
     }
 
@@ -197,7 +276,9 @@ class RandomChatApp {
             this.socket.emit('end-chat');
             this.currentPartner = null;
         }
+        this.isSearching = false;
         this.endVideoCall();
+        this.hideTypingIndicator();
         this.showScreen('welcome-screen');
     }
 
@@ -362,6 +443,55 @@ class RandomChatApp {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    // إدارة heartbeat للحفاظ على استقرار الاتصال
+    startHeartbeat() {
+        this.stopHeartbeat(); // إيقاف أي heartbeat سابق
+        
+        this.heartbeatInterval = setInterval(() => {
+            if (this.socket && this.socket.connected) {
+                this.socket.emit('ping');
+            } else {
+                console.log('الاتصال مقطوع، جار المحاولة مرة أخرى...');
+                this.handleConnectionLoss();
+            }
+        }, 30000); // كل 30 ثانية
+    }
+
+    stopHeartbeat() {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+    }
+
+    handleConnectionLoss() {
+        if (this.isConnected) {
+            this.isConnected = false;
+            this.updateConnectionStatus(false);
+            this.showSystemMessage('انقطع الاتصال. جار إعادة المحاولة...');
+        }
+        
+        // محاولة إعادة الاتصال اليدوي
+        this.reconnectAttempts++;
+        if (this.reconnectAttempts <= this.maxReconnectAttempts) {
+            setTimeout(() => {
+                if (!this.socket || !this.socket.connected) {
+                    console.log(`محاولة إعادة الاتصال اليدوي #${this.reconnectAttempts}`);
+                    this.socket.connect();
+                }
+            }, 2000 * this.reconnectAttempts); // تأخير متزايد
+        }
+    }
+
+    // فحص حالة الاتصال بشكل دوري
+    startConnectionMonitor() {
+        setInterval(() => {
+            if (this.socket && !this.socket.connected && this.isConnected) {
+                this.handleConnectionLoss();
+            }
+        }, 5000); // فحص كل 5 ثوان
     }
 }
 

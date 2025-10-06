@@ -10,7 +10,15 @@ const io = socketIo(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  // إعدادات تحسين الاتصال
+  pingTimeout: 60000, // 60 ثانية قبل timeout
+  pingInterval: 25000, // فحص الاتصال كل 25 ثانية
+  upgradeTimeout: 30000, // 30 ثانية لترقية الاتصال
+  allowEIO3: true, // دعم الإصدارات القديمة
+  transports: ['polling', 'websocket'], // تفعيل جميع وسائل النقل
+  allowUpgrades: true,
+  cookie: false
 });
 
 // خدمة الملفات الثابتة
@@ -173,8 +181,8 @@ io.on('connection', (socket) => {
   });
 
   // قطع الاتصال
-  socket.on('disconnect', () => {
-    console.log(`المستخدم ${socket.id} قطع الاتصال`);
+  socket.on('disconnect', (reason) => {
+    console.log(`المستخدم ${socket.id} قطع الاتصال - السبب: ${reason}`);
     
     // إنهاء أي دردشة نشطة
     const partner = endActiveChat(socket.id);
@@ -188,6 +196,22 @@ io.on('connection', (socket) => {
     
     // إزالة من المستخدمين المتصلين
     connectedUsers.delete(socket.id);
+  });
+
+  // معالجة أخطاء الاتصال
+  socket.on('error', (error) => {
+    console.log(`خطأ في الاتصال للمستخدم ${socket.id}:`, error);
+  });
+
+  // معالجة إعادة الاتصال
+  socket.on('reconnect', () => {
+    console.log(`المستخدم ${socket.id} أعاد الاتصال`);
+    socket.emit('reconnected');
+  });
+
+  // معالجة heartbeat
+  socket.on('ping', () => {
+    socket.emit('pong');
   });
 
   // إرسال إشارة "يكتب"
